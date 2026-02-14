@@ -1,11 +1,14 @@
 {
-  "Author": "Catinaud",
-  "Name": "PFReport",
-  "Punchline": "To report rmt",
-  "Description": "Report PF's to gms for funsies.",
-  "ApplicableVersion": "any",
-  "Tags": [
-    "pf",
-    "report"
-  ]
+    "Author": "Catphinaud",
+    "Name": "PFReport",
+    "Punchline": "Actual sweeping for once",
+    "Description": "Report RMT PF's to gms for funsies",
+    "ApplicableVersion": "any",
+    "Tags": [
+        "party finder",
+        "reporting"
+    ],
+    "InternalName": "PFReport",
+    "RepoUrl": "https://github.com/Catphinaud/PFReport",
+    "DalamudApiLevel": 14
 }
