@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Dalamud.NET.Sdk/14.0.1">
   <PropertyGroup>
-    <Version>0.0.0.2</Version>
+    <Version>0.0.0.3</Version>
+    <Description>Report RMT PF's to gms for funsies</Description>
     <PackageProjectUrl>https://github.com/Catphinaud/PFReport</PackageProjectUrl>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
+    <AppendPlatformToOutputPath>false</AppendPlatformToOutputPath>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ECommons" Version="3.1.0.22" />

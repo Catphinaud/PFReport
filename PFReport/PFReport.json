@@ -1,7 +1,7 @@
 {
     "Author": "Catphinaud",
     "Name": "PFReport",
-    "Punchline": "Actual sweeping for once",
+    "Punchline": "Reporting RMT PFs",
     "Description": "Report RMT PF's to gms for funsies",
     "ApplicableVersion": "any",
     "Tags": [
