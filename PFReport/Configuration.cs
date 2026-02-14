@@ -58,14 +58,6 @@ public class Configuration : IPluginConfiguration
                 Mode = RuleMatchMode.Contains,
                 Enabled = true,
             });
-
-            Rules.Add(new ReportableRule
-            {
-                Id = Guid.NewGuid(),
-                Pattern = "\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\b",
-                Mode = RuleMatchMode.Regex,
-                Enabled = true,
-            });
         }
         else if (loadedVersion <= 4)
         {
