@@ -1,0 +1,11 @@
+{
+  "Author": "Catinaud",
+  "Name": "PFReport",
+  "Punchline": "To report rmt",
+  "Description": "Report PF's to gms for funsies.",
+  "ApplicableVersion": "any",
+  "Tags": [
+    "pf",
+    "report"
+  ]
+}
