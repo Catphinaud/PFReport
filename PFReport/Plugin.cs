@@ -419,7 +419,7 @@ public sealed class Plugin : IDalamudPlugin
         sb.AddUiForegroundOff();
 
         sb.AddText(" | ");
-        sb.AddPartyFinderLink(listing.Id);
+        sb.AddPartyFinderLink((uint)listing.Id);
         sb.AddUiForeground(62);
         sb.AddText("Open in-game");
         sb.AddUiForegroundOff();
