@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Dalamud.Game.Command;
 using Dalamud.Game.Gui.PartyFinder.Types;
 using Dalamud.Game.Text.SeStringHandling;
@@ -9,8 +10,6 @@ using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
-using ECommons;
-using ECommons.Automation;
 using PFReport.Windows;
 
 namespace PFReport;
@@ -19,6 +18,7 @@ public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/pfreport";
     private const int MaxReportablePfChatAnnouncements = 4;
+
     private const string DefaultReportTemplate =
         "Name: {name}\nWorld: {world}\n\n\"{description}\"\n";
 
@@ -30,17 +30,19 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static INotificationManager NotificationManager { get; private set; } = null!;
+    [PluginService] internal static IClientState ClientState { get; private set; } = null!;
 
-    private readonly List<FilteredListingEntry> filteredListings = new();
-    private readonly HashSet<ulong> seenListingIds = new();
-    private readonly HashSet<int> seenListingHashes = new();
+    private readonly List<FilteredListingEntry> filteredListings = [];
+    private readonly HashSet<ulong> seenListingIds = [];
+    private readonly HashSet<int> seenListingHashes = [];
+    private readonly PartyFinderLogger partyFinderLogger;
 
     private readonly DalamudLinkPayload openReportLink;
     private readonly DalamudLinkPayload openSupportLink;
 
     private DisableMode disableMode = DisableMode.None;
     private DateTimeOffset? disabledUntilUtc;
-    private IReadOnlyList<ReportableRule> enabledRules = Array.Empty<ReportableRule>();
+    private IReadOnlyList<ReportableRule> enabledRules = [];
     private int reportableChatAnnouncementsUsed;
 
     public Configuration Configuration { get; init; }
@@ -54,6 +56,7 @@ public sealed class Plugin : IDalamudPlugin
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
         EnsureConfigDefaultsAndMigrate();
         ReloadRules();
+        partyFinderLogger = new PartyFinderLogger(Configuration);
 
         MainWindow = new MainWindow(this);
         WindowSystem.AddWindow(MainWindow);
@@ -68,7 +71,7 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainUi;
 
         PartyList.ReceiveListing += PartyListOnReceiveListing;
-        ECommonsMain.Init(PluginInterface, this);
+        // ECommonsMain.Init(PluginInterface, this);
 
         openReportLink = ChatGui.AddChatLinkHandler(0, OnLinkAction);
         openSupportLink = ChatGui.AddChatLinkHandler(1, OnLinkAction);
@@ -77,6 +80,7 @@ public sealed class Plugin : IDalamudPlugin
     public void Dispose()
     {
         ChatGui.RemoveChatLinkHandler();
+        partyFinderLogger.Dispose();
         PartyList.ReceiveListing -= PartyListOnReceiveListing;
         PluginInterface.UiBuilder.Draw -= OnUiDraw;
         PluginInterface.UiBuilder.OpenConfigUi -= OpenStatusUi;
@@ -84,7 +88,6 @@ public sealed class Plugin : IDalamudPlugin
 
         WindowSystem.RemoveAllWindows();
         CommandManager.RemoveHandler(CommandName);
-        ECommonsMain.Dispose();
     }
 
     private void EnsureConfigDefaultsAndMigrate()
@@ -107,6 +110,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         try
         {
+            partyFinderLogger.Observe(listing, _);
+
             if (IsFilteringDisabled)
                 return;
 
@@ -182,7 +187,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public static bool TryParseDisableDuration(string input, out TimeSpan duration)
     {
-        duration = default;
+        duration = TimeSpan.Zero;
         var value = input.Trim().ToLowerInvariant();
         if (value.Length == 0)
             return false;
@@ -248,7 +253,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private void MaintainDisableState()
     {
-        if (disableMode == DisableMode.UntilLogout && !ECommons.GameHelpers.Player.Available)
+        if (disableMode == DisableMode.UntilLogout && !ClientState.IsLoggedIn)
         {
             EnableReporting();
             ChatGui.Print("[PFReport] Reporting re-enabled after logout.");
@@ -302,7 +307,7 @@ public sealed class Plugin : IDalamudPlugin
     public void UpsertRule(ReportableRule rule)
     {
         var sanitized = rule.Clone();
-        sanitized.Pattern = (sanitized.Pattern ?? string.Empty).Trim();
+        sanitized.Pattern = sanitized.Pattern.Trim();
 
         if (sanitized.Pattern.Length == 0)
             return;
@@ -351,8 +356,8 @@ public sealed class Plugin : IDalamudPlugin
     public void SaveReportTemplate(string template)
     {
         Configuration.ReportTemplate = string.IsNullOrWhiteSpace(template)
-            ? DefaultReportTemplate
-            : template;
+                                           ? DefaultReportTemplate
+                                           : template;
 
         Configuration.Save();
     }
@@ -360,12 +365,12 @@ public sealed class Plugin : IDalamudPlugin
     public string ApplyTemplate(FilteredListingEntry entry)
     {
         return Configuration.ReportTemplate
-            .Replace("{name}", entry.Name, StringComparison.OrdinalIgnoreCase)
-            .Replace("{world}", entry.World, StringComparison.OrdinalIgnoreCase)
-            .Replace("{rule}", entry.MatchedRulePattern, StringComparison.OrdinalIgnoreCase)
-            .Replace("{matched}", entry.MatchedValue, StringComparison.OrdinalIgnoreCase)
-            .Replace("{description}", entry.Description, StringComparison.OrdinalIgnoreCase)
-            .Replace("{time}", entry.SeenAt.ToString("yyyy-MM-dd HH:mm:ss"), StringComparison.OrdinalIgnoreCase);
+                            .Replace("{name}", entry.Name, StringComparison.OrdinalIgnoreCase)
+                            .Replace("{world}", entry.World, StringComparison.OrdinalIgnoreCase)
+                            .Replace("{rule}", entry.MatchedRulePattern, StringComparison.OrdinalIgnoreCase)
+                            .Replace("{matched}", entry.MatchedValue, StringComparison.OrdinalIgnoreCase)
+                            .Replace("{description}", entry.Description, StringComparison.OrdinalIgnoreCase)
+                            .Replace("{time}", entry.SeenAt.ToString("yyyy-MM-dd HH:mm:ss"), StringComparison.OrdinalIgnoreCase);
     }
 
     public void AddFilteredListing(IPartyFinderListing listing, FilterMatchResult match)
@@ -444,6 +449,32 @@ public sealed class Plugin : IDalamudPlugin
         reportableChatAnnouncementsUsed = 0;
     }
 
+    public void SaveLoggingConfiguration(bool enabled, string url, string apiToken, int flushDelayMs, int sentHashCacheSize)
+    {
+        Configuration.LoggingEnabled = enabled;
+        Configuration.LoggingUrl = url;
+        Configuration.LoggingApiToken = apiToken;
+        Configuration.LoggingFlushDelayMs = flushDelayMs;
+        Configuration.LoggingSentHashCacheSize = sentHashCacheSize;
+        Configuration.MigrateAndNormalize();
+        Configuration.Save();
+    }
+
+    public Task<string> TestLoggingEndpointAsync()
+    {
+        return partyFinderLogger.TestEndpointAsync();
+    }
+
+    public Task FlushLoggingAsync()
+    {
+        return partyFinderLogger.FlushPendingAsync();
+    }
+
+    public void ResetLoggingCache()
+    {
+        partyFinderLogger.ResetCache();
+    }
+
     public void EnableReporting()
     {
         disableMode = DisableMode.None;
@@ -470,6 +501,9 @@ public sealed class Plugin : IDalamudPlugin
 
     public IReadOnlyList<FilteredListingEntry> FilteredListings => filteredListings;
     public int ReportableChatAnnouncementsUsed => reportableChatAnnouncementsUsed;
+    public int LoggingPendingCount => partyFinderLogger.PendingCount;
+    public int LoggingInFlightCount => partyFinderLogger.InFlightCount;
+    public int LoggingSentHashCount => partyFinderLogger.SentHashCount;
 
     public bool IsFilteringDisabled
     {
@@ -513,4 +547,5 @@ public sealed record FilteredListingEntry(
     Guid MatchedRuleId,
     string MatchedRulePattern,
     string MatchedValue,
-    DateTimeOffset SeenAt);
+    DateTimeOffset SeenAt
+);

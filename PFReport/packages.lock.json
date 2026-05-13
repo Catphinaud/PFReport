@@ -13,12 +13,6 @@
         "requested": "[1.2.39, )",
         "resolved": "1.2.39",
         "contentHash": "fcFN01tDTIQqDuTwr1jUQK/geofiwjG5DycJQOnC72i1SsLAk1ELe+apBOuZ11UMQG8YKFZG1FgvjZPbqHyatg=="
-      },
-      "ECommons": {
-        "type": "Direct",
-        "requested": "[3.2.0.6, )",
-        "resolved": "3.2.0.6",
-        "contentHash": "ZONTpNsOLTlX0OPhBU/mHK9EWqmxgc2ZPwZtmV0rucsNyARXjeNsaGC9bcumGPBVpICTQBqeg4V1iew3OdmGYQ=="
       }
     }
   }

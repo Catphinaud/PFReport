@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Threading.Tasks;
 
 namespace PFReport.Windows;
 
@@ -34,6 +35,14 @@ public class MainWindow : Window
     private string reportsSearch = string.Empty;
     private ulong? selectedReportId;
 
+    private bool loggingEnabledEditor;
+    private string loggingUrlEditor;
+    private string loggingApiTokenEditor;
+    private int loggingFlushDelayMsEditor;
+    private int loggingSentHashCacheSizeEditor;
+    private bool loggingTestInProgress;
+    private string loggingTestResult = "Not tested.";
+
     public MainWindow(Plugin plugin)
         : base("PFReport###PFReport_Main", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
@@ -45,6 +54,11 @@ public class MainWindow : Window
 
         this.plugin = plugin;
         templateEditor = plugin.Configuration.ReportTemplate;
+        loggingEnabledEditor = plugin.Configuration.LoggingEnabled;
+        loggingUrlEditor = plugin.Configuration.LoggingUrl;
+        loggingApiTokenEditor = plugin.Configuration.LoggingApiToken;
+        loggingFlushDelayMsEditor = plugin.Configuration.LoggingFlushDelayMs;
+        loggingSentHashCacheSizeEditor = plugin.Configuration.LoggingSentHashCacheSize;
     }
 
     public void OpenStatusTab()
@@ -84,6 +98,12 @@ public class MainWindow : Window
         if (ImGui.BeginTabItem("Template"))
         {
             DrawTemplateTab();
+            ImGui.EndTabItem();
+        }
+
+        if (ImGui.BeginTabItem("Logging"))
+        {
+            DrawLoggingTab();
             ImGui.EndTabItem();
         }
 
@@ -431,6 +451,62 @@ public class MainWindow : Window
         ImGui.EndChild();
     }
 
+    private void DrawLoggingTab()
+    {
+        ImGui.TextUnformatted("Party Finder Logging");
+        ImGui.TextDisabled("Opt-in full PF logging. Sends name, home world, description, and search area after each PF batch completes.");
+        ImGui.Spacing();
+
+        ImGui.Checkbox("Enable logging", ref loggingEnabledEditor);
+
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputText("Ingest URL", ref loggingUrlEditor, 2048);
+        ImGui.TextDisabled("Default server endpoint: http://127.0.0.1:8787/v1/listings");
+
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputText("Bearer token", ref loggingApiTokenEditor, 512, ImGuiInputTextFlags.Password);
+        ImGui.TextDisabled("Leave empty when the server is not configured with PFREPORT_TOKEN.");
+
+        ImGui.SetNextItemWidth(160);
+        ImGui.InputInt("Flush delay ms", ref loggingFlushDelayMsEditor);
+
+        ImGui.SetNextItemWidth(160);
+        ImGui.InputInt("Sent hash cache size", ref loggingSentHashCacheSizeEditor);
+
+        if (ImGui.Button("Save Logging Config", new Vector2(180, 0)))
+            SaveLoggingEditors();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Save + Test", new Vector2(140, 0)) && !loggingTestInProgress)
+        {
+            SaveLoggingEditors();
+            _ = RunLoggingTestAsync();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Reload", new Vector2(100, 0)))
+            ReloadLoggingEditors();
+
+        ImGui.Separator();
+
+        DrawMetricCard("Pending", plugin.LoggingPendingCount.ToString(), new Vector4(0.60f, 0.86f, 1.00f, 1f), 180f);
+        ImGui.SameLine();
+        DrawMetricCard("In Flight", plugin.LoggingInFlightCount.ToString(), new Vector4(1.00f, 0.78f, 0.42f, 1f), 180f);
+        ImGui.SameLine();
+        DrawMetricCard("Cached Hashes", plugin.LoggingSentHashCount.ToString(), new Vector4(0.70f, 0.90f, 0.62f, 1f), 220f);
+
+        if (ImGui.Button("Flush Pending Now", new Vector2(180, 0)))
+            _ = plugin.FlushLoggingAsync();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Reset In-Memory Log Cache", new Vector2(240, 0)))
+            plugin.ResetLoggingCache();
+
+        ImGui.Separator();
+        ImGui.TextDisabled("Connectivity Test");
+        ImGui.TextWrapped(loggingTestResult);
+    }
+
     private void DrawReportSummaryRow(int total)
     {
         var colA = new Vector4(0.60f, 0.86f, 1.00f, 1f);
@@ -462,6 +538,43 @@ public class MainWindow : Window
             || entry.World.Contains(s, StringComparison.OrdinalIgnoreCase)
             || entry.MatchedRulePattern.Contains(s, StringComparison.OrdinalIgnoreCase)
             || entry.Description.Contains(s, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void SaveLoggingEditors()
+    {
+        plugin.SaveLoggingConfiguration(
+            loggingEnabledEditor,
+            loggingUrlEditor,
+            loggingApiTokenEditor,
+            loggingFlushDelayMsEditor,
+            loggingSentHashCacheSizeEditor);
+
+        ReloadLoggingEditors();
+        Plugin.ChatGui.Print("[PFReport] Saved logging configuration.");
+    }
+
+    private void ReloadLoggingEditors()
+    {
+        loggingEnabledEditor = plugin.Configuration.LoggingEnabled;
+        loggingUrlEditor = plugin.Configuration.LoggingUrl;
+        loggingApiTokenEditor = plugin.Configuration.LoggingApiToken;
+        loggingFlushDelayMsEditor = plugin.Configuration.LoggingFlushDelayMs;
+        loggingSentHashCacheSizeEditor = plugin.Configuration.LoggingSentHashCacheSize;
+    }
+
+    private async Task RunLoggingTestAsync()
+    {
+        loggingTestInProgress = true;
+        loggingTestResult = "Testing...";
+
+        try
+        {
+            loggingTestResult = await plugin.TestLoggingEndpointAsync();
+        }
+        finally
+        {
+            loggingTestInProgress = false;
+        }
     }
 
     private void BeginNewRule(string? status = null)
