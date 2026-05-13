@@ -8,7 +8,7 @@ namespace PFReport;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 5;
+    public int Version { get; set; } = 6;
 
     // Legacy field kept for migration from old configs.
     public List<string> CustomReportableTerms { get; set; } = new();
@@ -17,6 +17,16 @@ public class Configuration : IPluginConfiguration
 
     public string ReportTemplate { get; set; } =
         "Name: {name}\nWorld: {world}\n\n\"{description}\"\n";
+
+    public bool LoggingEnabled { get; set; }
+
+    public string LoggingUrl { get; set; } = "http://127.0.0.1:8787/v1/listings";
+
+    public string LoggingApiToken { get; set; } = string.Empty;
+
+    public int LoggingFlushDelayMs { get; set; } = 1200;
+
+    public int LoggingSentHashCacheSize { get; set; } = 20000;
 
     public void MigrateAndNormalize()
     {
@@ -102,11 +112,19 @@ public class Configuration : IPluginConfiguration
 
         Rules = cleaned;
         CustomReportableTerms = Rules
-            .Where(r => r.Mode == RuleMatchMode.Contains)
-            .Select(r => r.Pattern)
-            .ToList();
+                                .Where(r => r.Mode == RuleMatchMode.Contains)
+                                .Select(r => r.Pattern)
+                                .ToList();
 
-        Version = 5;
+        LoggingUrl = (LoggingUrl ?? string.Empty).Trim();
+        if (LoggingUrl.Length == 0)
+            LoggingUrl = "http://127.0.0.1:8787/v1/listings";
+
+        LoggingApiToken = (LoggingApiToken ?? string.Empty).Trim();
+        LoggingFlushDelayMs = Math.Clamp(LoggingFlushDelayMs, 250, 10000);
+        LoggingSentHashCacheSize = Math.Clamp(LoggingSentHashCacheSize, 1000, 250000);
+
+        Version = 6;
     }
 
     private void EnsureContainsRule(string pattern)
@@ -137,9 +155,9 @@ public class Configuration : IPluginConfiguration
     public IReadOnlyList<ReportableRule> GetEnabledRules()
     {
         return Rules
-            .Where(r => r.Enabled)
-            .Select(r => r.Clone())
-            .ToList();
+               .Where(r => r.Enabled)
+               .Select(r => r.Clone())
+               .ToList();
     }
 
     public void Save()
