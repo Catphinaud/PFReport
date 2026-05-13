@@ -15,6 +15,16 @@ namespace PFReport;
 
 internal sealed class PartyFinderLogger : IDisposable
 {
+    private const int FailureThreshold = 5;
+    private static readonly TimeSpan FailurePauseDuration = TimeSpan.FromHours(1);
+    private static readonly TimeSpan[] FailureRetryDelays =
+    {
+        TimeSpan.FromSeconds(15),
+        TimeSpan.FromSeconds(30),
+        TimeSpan.FromMinutes(1),
+        TimeSpan.FromMinutes(2),
+    };
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
@@ -29,8 +39,11 @@ internal sealed class PartyFinderLogger : IDisposable
     private readonly HashSet<ulong> sentHashes = new();
     private readonly Queue<ulong> sentHashOrder = new();
     private readonly Timer flushTimer;
+    private readonly SemaphoreSlim sendGate = new(1, 1);
+    private readonly CancellationTokenSource disposeCts = new();
 
-    private int? currentBatchNumber;
+    private int consecutiveFailures;
+    private DateTimeOffset? pausedUntilUtc;
     private bool disposed;
 
     public PartyFinderLogger(Configuration configuration)
@@ -69,23 +82,18 @@ internal sealed class PartyFinderLogger : IDisposable
 
     public void Observe(IPartyFinderListing listing, IPartyFinderListingEventArgs args)
     {
-        if (!configuration.LoggingEnabled || !TryGetEndpointUri(out _))
+        if (!configuration.LoggingEnabled || !TryGetEndpointUri(out _) || IsPaused())
             return;
 
         var logListing = BuildListing(listing);
         if (logListing.Description.Length == 0)
             return;
 
-        List<PartyFinderLogListing>? batchToFlush = null;
         lock (sync)
         {
             if (disposed)
                 return;
 
-            if (currentBatchNumber.HasValue && currentBatchNumber.Value != args.BatchNumber)
-                batchToFlush = DrainPendingLocked();
-
-            currentBatchNumber = args.BatchNumber;
             if (sentHashes.Contains(logListing.HashValue)
                 || inFlightHashes.Contains(logListing.HashValue)
                 || !pendingHashes.Add(logListing.HashValue))
@@ -97,9 +105,6 @@ internal sealed class PartyFinderLogger : IDisposable
             pendingListings.Add(logListing);
             ArmFlushTimerLocked();
         }
-
-        if (batchToFlush is { Count: > 0 })
-            _ = SendBatchAsync(batchToFlush);
     }
 
     public Task FlushPendingAsync()
@@ -107,7 +112,7 @@ internal sealed class PartyFinderLogger : IDisposable
         List<PartyFinderLogListing> batch;
         lock (sync)
         {
-            if (disposed)
+            if (disposed || IsPausedLocked())
                 return Task.CompletedTask;
 
             batch = DrainPendingLocked();
@@ -138,7 +143,10 @@ internal sealed class PartyFinderLogger : IDisposable
             var status = $"{(int)response.StatusCode} {response.ReasonPhrase}".Trim();
 
             if (response.IsSuccessStatusCode)
+            {
+                ClearFailureState();
                 return body.Length == 0 ? $"OK: {status}" : $"OK: {status} | {body}";
+            }
 
             return body.Length == 0 ? $"Failed: {status}" : $"Failed: {status} | {body}";
         }
@@ -157,7 +165,8 @@ internal sealed class PartyFinderLogger : IDisposable
             inFlightHashes.Clear();
             sentHashes.Clear();
             sentHashOrder.Clear();
-            currentBatchNumber = null;
+            consecutiveFailures = 0;
+            pausedUntilUtc = null;
             flushTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
     }
@@ -173,14 +182,36 @@ internal sealed class PartyFinderLogger : IDisposable
             flushTimer.Change(Timeout.Infinite, Timeout.Infinite);
         }
 
+        disposeCts.Cancel();
         flushTimer.Dispose();
         httpClient.Dispose();
+        disposeCts.Dispose();
     }
 
     private async Task SendBatchAsync(IReadOnlyCollection<PartyFinderLogListing> batch)
     {
-        if (batch.Count == 0 || !configuration.LoggingEnabled || !TryGetEndpointUri(out var endpoint))
+        if (batch.Count == 0 || !configuration.LoggingEnabled || !TryGetEndpointUri(out var endpoint) || IsPaused())
             return;
+
+        if (!await sendGate.WaitAsync(0).ConfigureAwait(false))
+        {
+            lock (sync)
+            {
+                if (!disposed)
+                    RequeueBatchLocked(batch, armTimer: true);
+            }
+
+            return;
+        }
+
+        lock (sync)
+        {
+            if (disposed)
+            {
+                sendGate.Release();
+                return;
+            }
+        }
 
         var hashes = batch.Select(x => x.HashValue).ToArray();
         lock (sync)
@@ -193,11 +224,12 @@ internal sealed class PartyFinderLogger : IDisposable
         {
             var request = new PartyFinderLogBatch("PFReport", DateTimeOffset.UtcNow, false, batch);
             using var message = BuildPostRequest(endpoint, request);
-            using var response = await httpClient.SendAsync(message).ConfigureAwait(false);
+            Plugin.Log.Debug("PF logging sending {Count} listings", batch.Count);
+            using var response = await httpClient.SendAsync(message, disposeCts.Token).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
-                Plugin.Log.Warning("PF logging failed: {StatusCode} {ReasonPhrase}", (int)response.StatusCode, response.ReasonPhrase ?? string.Empty);
+                RegisterFailure(batch, $"{(int)response.StatusCode} {response.ReasonPhrase}".Trim());
                 return;
             }
 
@@ -205,11 +237,24 @@ internal sealed class PartyFinderLogger : IDisposable
             {
                 foreach (var hash in hashes)
                     AddSentHashLocked(hash);
+
+                consecutiveFailures = 0;
+                pausedUntilUtc = null;
             }
+
+            Plugin.Log.Information("PF logging sent {Count} listings", batch.Count);
+        }
+        catch (OperationCanceledException) when (IsDisposed())
+        {
+            Plugin.Log.Debug("PF logging send canceled during dispose");
+        }
+        catch (ObjectDisposedException) when (IsDisposed())
+        {
+            Plugin.Log.Debug("PF logging send stopped during dispose");
         }
         catch (Exception ex)
         {
-            Plugin.Log.Warning(ex, "PF logging request failed");
+            RegisterFailure(batch, $"{ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -218,6 +263,8 @@ internal sealed class PartyFinderLogger : IDisposable
                 foreach (var hash in hashes)
                     inFlightHashes.Remove(hash);
             }
+
+            sendGate.Release();
         }
     }
 
@@ -234,6 +281,110 @@ internal sealed class PartyFinderLogger : IDisposable
             message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", configuration.LoggingApiToken.Trim());
 
         return message;
+    }
+
+    private bool IsPaused()
+    {
+        lock (sync)
+            return IsPausedLocked();
+    }
+
+    private bool IsDisposed()
+    {
+        lock (sync)
+            return disposed;
+    }
+
+    private bool IsPausedLocked()
+    {
+        if (pausedUntilUtc == null)
+            return false;
+
+        if (DateTimeOffset.UtcNow < pausedUntilUtc.Value)
+            return true;
+
+        pausedUntilUtc = null;
+        consecutiveFailures = 0;
+        return false;
+    }
+
+    private void ClearFailureState()
+    {
+        lock (sync)
+        {
+            consecutiveFailures = 0;
+            pausedUntilUtc = null;
+        }
+    }
+
+    private void RegisterFailure(IReadOnlyCollection<PartyFinderLogListing> failedBatch, string reason)
+    {
+        TimeSpan? retryDelay = null;
+        var failureCount = 0;
+        var shouldPause = false;
+        lock (sync)
+        {
+            if (disposed)
+                return;
+
+            consecutiveFailures++;
+            failureCount = consecutiveFailures;
+            RequeueBatchLocked(failedBatch, armTimer: false);
+
+            if (consecutiveFailures < FailureThreshold)
+            {
+                retryDelay = GetFailureRetryDelay();
+                ArmFlushTimerLocked(retryDelay.Value);
+            }
+            else if (!IsPausedLocked())
+            {
+                shouldPause = true;
+                pausedUntilUtc = DateTimeOffset.UtcNow.Add(FailurePauseDuration);
+                pendingListings.Clear();
+                pendingHashes.Clear();
+                flushTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            }
+        }
+
+        if (retryDelay.HasValue)
+        {
+            Plugin.Log.Warning(
+                "PF logging failed {FailureCount}/{FailureThreshold}: {Reason}; retrying in {RetrySeconds}s",
+                failureCount,
+                FailureThreshold,
+                reason,
+                (int)retryDelay.Value.TotalSeconds);
+            return;
+        }
+
+        if (shouldPause)
+        {
+            Plugin.Log.Warning("PF logging paused for {PauseMinutes}m after repeated failures: {Reason}", (int)FailurePauseDuration.TotalMinutes, reason);
+            Plugin.ChatGui.Print($"[PFReport] Party finder logging server looks down. Logging paused for {(int)FailurePauseDuration.TotalHours} hour.");
+        }
+    }
+
+    private void RequeueBatchLocked(IReadOnlyCollection<PartyFinderLogListing> batch, bool armTimer)
+    {
+        if (pausedUntilUtc != null)
+            return;
+
+        foreach (var listing in batch)
+        {
+            if (!pendingHashes.Add(listing.HashValue))
+                continue;
+
+            pendingListings.Add(listing);
+        }
+
+        if (armTimer && pendingListings.Count > 0)
+            ArmFlushTimerLocked();
+    }
+
+    private TimeSpan GetFailureRetryDelay()
+    {
+        var index = Math.Clamp(consecutiveFailures - 1, 0, FailureRetryDelays.Length - 1);
+        return FailureRetryDelays[index];
     }
 
     private bool TryGetEndpointUri(out Uri endpoint)
@@ -259,6 +410,11 @@ internal sealed class PartyFinderLogger : IDisposable
     private void ArmFlushTimerLocked()
     {
         flushTimer.Change(configuration.LoggingFlushDelayMs, Timeout.Infinite);
+    }
+
+    private void ArmFlushTimerLocked(TimeSpan delay)
+    {
+        flushTimer.Change(delay, Timeout.InfiniteTimeSpan);
     }
 
     private void AddSentHashLocked(ulong hash)
