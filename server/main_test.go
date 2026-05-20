@@ -191,6 +191,48 @@ func TestRecentRoutePaginates(t *testing.T) {
 	}
 }
 
+func TestRecentRouteFilters(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "pfreport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+
+	server := &server{store: store, maxBodyBytes: defaultMaxBodyBytes}
+	now := time.Now().UTC()
+	_, _, err = store.insert("test", now, now, []listing{
+		{Hash: "0000000000000041", ListingID: 41, DutyID: 777, Minilv: 710, Name: "Alpha", HomeWorld: "Ragnarok", Description: "fresh prog", SearchArea: "DataCenter", ObservedAt: now},
+		{Hash: "0000000000000042", ListingID: 42, DutyID: 888, Minilv: 730, Name: "Beta", HomeWorld: "Cerberus", Description: "farm", SearchArea: "World", ObservedAt: now.Add(time.Millisecond)},
+		{Hash: "0000000000000043", ListingID: 43, DutyID: 888, Minilv: 750, Name: "Gamma", HomeWorld: "Ragnarok", Description: "clear", SearchArea: "DataCenter", ObservedAt: now.Add(2 * time.Millisecond)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/recent?world=ragnarok&dutyId=888&minilvMin=740&minilvMax=760", nil)
+	rec := httptest.NewRecorder()
+	server.recent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	var response struct {
+		Records []storedRecord `json:"records"`
+		Total   int            `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+
+	if response.Total != 1 || len(response.Records) != 1 {
+		t.Fatalf("response = %+v", response)
+	}
+	if response.Records[0].Listing.Name != "Gamma" {
+		t.Fatalf("record = %+v", response.Records[0].Listing)
+	}
+}
+
 func TestExportCSV(t *testing.T) {
 	store, err := openStore(filepath.Join(t.TempDir(), "pfreport.db"))
 	if err != nil {
@@ -226,6 +268,41 @@ func TestExportCSV(t *testing.T) {
 
 	if rows[1][7] != "CSV Player" || rows[1][9] != "hello,csv" {
 		t.Fatalf("row = %#v", rows[1])
+	}
+}
+
+func TestExportCSVFilters(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "pfreport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+
+	server := &server{store: store, maxBodyBytes: defaultMaxBodyBytes}
+	now := time.Now().UTC()
+	_, _, err = store.insert("test", now, now, []listing{
+		{Hash: "0000000000000051", ListingID: 51, DutyID: 777, Minilv: 710, Name: "Low Player", HomeWorld: "Ragnarok", Description: "low", SearchArea: "DataCenter", ObservedAt: now},
+		{Hash: "0000000000000052", ListingID: 52, DutyID: 888, Minilv: 750, Name: "High Player", HomeWorld: "Ragnarok", Description: "high", SearchArea: "DataCenter", ObservedAt: now.Add(time.Millisecond)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/export?format=csv&minilvMin=740", nil)
+	rec := httptest.NewRecorder()
+	server.export(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	rows, err := csv.NewReader(bytes.NewReader(rec.Body.Bytes())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rows) != 2 || rows[1][7] != "High Player" {
+		t.Fatalf("rows = %#v", rows)
 	}
 }
 

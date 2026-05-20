@@ -83,7 +83,7 @@ func (s *server) routes(w http.ResponseWriter, r *http.Request) {
 		{Method: "GET", Path: "/health", Description: "health check"},
 		{Method: "GET", Path: "/v1/routes", Description: "route list"},
 		{Method: "GET", Path: "/v1/stats", Description: "counters"},
-		{Method: "GET", Path: "/v1/recent?page=1&perPage=100&q=spam", Description: "paged recent listings"},
+		{Method: "GET", Path: "/v1/recent?page=1&perPage=100&name=foo&world=odin&minilvMin=700", Description: "paged recent listings"},
 		{Method: "POST", Path: "/v1/listings", Description: "ingest"},
 		{Method: "POST", Path: "/v1/test", Description: "connectivity test"},
 		{Method: "GET", Path: "/v1/export?format=csv&gzip=1", Description: "export"},
@@ -111,7 +111,7 @@ func (s *server) recent(w http.ResponseWriter, r *http.Request) {
 		perPage = queryInt(r, "limit", 100)
 	}
 
-	result := s.store.page(page, perPage, r.URL.Query().Get("q"))
+	result := s.store.page(page, perPage, filtersFromRequest(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
 		"records":  result.Records,
@@ -196,7 +196,7 @@ func (s *server) export(w http.ResponseWriter, r *http.Request) {
 
 	var fileName string
 	var contentType string
-	var export func(io.Writer) error
+	var export func(io.Writer, recordFilter) error
 	switch format {
 	case "csv":
 		fileName = "pfreport.csv"
@@ -222,7 +222,7 @@ func (s *server) export(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
-	if err := export(out); err != nil {
+	if err := export(out, filtersFromRequest(r)); err != nil {
 		log.Printf("export failed: %v", err)
 	}
 }
@@ -252,6 +252,73 @@ func queryInt(r *http.Request, key string, fallback int) int {
 	}
 
 	return n
+}
+
+func filtersFromRequest(r *http.Request) recordFilter {
+	query := r.URL.Query()
+	filter := recordFilter{
+		Query:       query.Get("q"),
+		Name:        query.Get("name"),
+		HomeWorld:   firstQuery(query, "homeWorld", "world"),
+		Description: query.Get("description"),
+		SearchArea:  firstQuery(query, "searchArea", "area"),
+		Hash:        query.Get("hash"),
+		Source:      query.Get("source"),
+	}
+
+	if dutyID, ok := queryUint16(query.Get("dutyId")); ok {
+		filter.DutyID = dutyID
+		filter.HasDutyID = true
+	}
+	if listingID, ok := queryUint64(query.Get("listingId")); ok {
+		filter.ListingID = listingID
+		filter.HasListingID = true
+	}
+	if minilv, ok := queryUint16(firstQuery(query, "minilv", "ilv")); ok {
+		filter.MinilvMin = minilv
+		filter.MinilvMax = minilv
+		filter.HasMinilvMin = true
+		filter.HasMinilvMax = true
+	}
+	if minilv, ok := queryUint16(firstQuery(query, "minilvMin", "ilvMin")); ok {
+		filter.MinilvMin = minilv
+		filter.HasMinilvMin = true
+	}
+	if minilv, ok := queryUint16(firstQuery(query, "minilvMax", "ilvMax")); ok {
+		filter.MinilvMax = minilv
+		filter.HasMinilvMax = true
+	}
+
+	return filter
+}
+
+func firstQuery(query map[string][]string, keys ...string) string {
+	for _, key := range keys {
+		if values := query[key]; len(values) > 0 && values[0] != "" {
+			return values[0]
+		}
+	}
+
+	return ""
+}
+
+func queryUint16(raw string) (uint16, bool) {
+	n, ok := queryUint64(raw)
+	if !ok || n > 65535 {
+		return 0, false
+	}
+
+	return uint16(n), true
+}
+
+func queryUint64(raw string) (uint64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+
+	n, err := strconv.ParseUint(raw, 10, 64)
+	return n, err == nil
 }
 
 func wantsGzip(r *http.Request) bool {

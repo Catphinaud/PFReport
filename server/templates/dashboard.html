@@ -75,9 +75,13 @@
 
         .toolbar {
             display: grid;
-            grid-template-columns: minmax(220px, 1.2fr) minmax(280px, 2fr) 90px 90px 90px 90px;
+            grid-template-columns: minmax(220px, 1.2fr) minmax(220px, 1fr) repeat(5, minmax(90px, 0.6fr));
             gap: 8px;
             margin: 0 0 14px;
+        }
+
+        .toolbar .wide {
+            grid-column: span 2;
         }
 
         input, button {
@@ -220,9 +224,18 @@
 
     <section class="toolbar" aria-label="Filters">
         <input id="token" type="password" placeholder="Bearer token, if configured">
-        <input id="query" placeholder="Search name, world, duty, minilv, hash, description">
-        <input id="page" type="number" min="1" value="1">
-        <input id="limit" type="number" min="1" max="2000" value="100">
+        <input id="query" class="wide" placeholder="Any text / old search">
+        <input id="name" placeholder="Name">
+        <input id="world" placeholder="World">
+        <input id="dutyId" type="number" min="0" placeholder="Duty">
+        <input id="minilvMin" type="number" min="0" placeholder="min ilv">
+        <input id="minilvMax" type="number" min="0" placeholder="max ilv">
+        <input id="description" class="wide" placeholder="Description contains">
+        <input id="area" placeholder="Area">
+        <input id="hash" placeholder="Hash">
+        <input id="source" placeholder="Source">
+        <input id="page" type="number" min="1" value="1" title="Page">
+        <input id="limit" type="number" min="1" max="2000" value="100" title="Rows per page">
         <button id="prevPage">Prev</button>
         <button id="nextPage">Next</button>
         <button id="refresh">Refresh</button>
@@ -315,17 +328,27 @@
     }
 
     function loadRecords() {
-      const page = encodeURIComponent($("#page").val() || "1");
-      const limit = encodeURIComponent($("#limit").val() || "100");
-      const q = encodeURIComponent($("#query").val() || "");
-      return api("/v1/recent?page=" + page + "&perPage=" + limit + "&q=" + q).done(function (data) {
+      const params = new URLSearchParams();
+      addParam(params, "page", $("#page").val() || "1");
+      addParam(params, "perPage", $("#limit").val() || "100");
+      addParam(params, "q", $("#query").val());
+      addParam(params, "name", $("#name").val());
+      addParam(params, "world", $("#world").val());
+      addParam(params, "dutyId", $("#dutyId").val());
+      addParam(params, "minilvMin", $("#minilvMin").val());
+      addParam(params, "minilvMax", $("#minilvMax").val());
+      addParam(params, "description", $("#description").val());
+      addParam(params, "area", $("#area").val());
+      addParam(params, "hash", $("#hash").val());
+      addParam(params, "source", $("#source").val());
+      return api("/v1/recent?" + params.toString()).done(function (data) {
         const rows = data.records || [];
         $("#pageState").text((data.page || 1) + " / " + Math.max(1, Math.ceil((data.total || 0) / (data.perPage || 1))));
         $("#nextPage").prop("disabled", !data.hasMore);
         $("#prevPage").prop("disabled", (data.page || 1) <= 1);
         $("#records").empty();
         if (!rows.length) {
-        $("#records").append('<tr><td colspan="8" class="empty">No records</td></tr>');
+          $("#records").append('<tr><td colspan="8" class="empty">No records</td></tr>');
           return;
         }
 
@@ -345,6 +368,13 @@
           );
         });
       });
+    }
+
+    function addParam(params, key, value) {
+      value = $.trim(value || "");
+      if (value !== "") {
+        params.set(key, value);
+      }
     }
 
     function loadRoutes() {
@@ -385,7 +415,12 @@
         $("#page").val(page);
         refresh();
       });
-      $("#query").on("keydown", function (e) { if (e.key === "Enter") { $("#page").val(1); refresh(); } });
+      $(".toolbar input").on("keydown", function (e) {
+        if (e.key === "Enter") {
+          $("#page").val(1);
+          refresh();
+        }
+      });
       refresh();
       setInterval(refresh, 10000);
     });

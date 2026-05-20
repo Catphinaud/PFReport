@@ -72,6 +72,24 @@ type pageResult struct {
 	HasMore bool           `json:"hasMore"`
 }
 
+type recordFilter struct {
+	Query        string
+	Name         string
+	HomeWorld    string
+	Description  string
+	SearchArea   string
+	Hash         string
+	Source       string
+	DutyID       uint16
+	HasDutyID    bool
+	ListingID    uint64
+	HasListingID bool
+	MinilvMin    uint16
+	HasMinilvMin bool
+	MinilvMax    uint16
+	HasMinilvMax bool
+}
+
 func openStore(path string) (*store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -137,11 +155,11 @@ func (s *store) stats() storeStats {
 }
 
 func (s *store) recent(limit int, query string) []storedRecord {
-	page := s.page(1, limit, query)
+	page := s.page(1, limit, recordFilter{Query: query})
 	return page.Records
 }
 
-func (s *store) page(page int, perPage int, query string) pageResult {
+func (s *store) page(page int, perPage int, filter recordFilter) pageResult {
 	if page <= 0 {
 		page = 1
 	}
@@ -155,7 +173,7 @@ func (s *store) page(page int, perPage int, query string) pageResult {
 	}
 
 	skip := (page - 1) * perPage
-	needle := strings.ToLower(strings.TrimSpace(query))
+	filter.normalize()
 	out := pageResult{
 		Records: make([]storedRecord, 0, perPage),
 		Page:    page,
@@ -167,7 +185,7 @@ func (s *store) page(page int, perPage int, query string) pageResult {
 		recordsByTime := tx.Bucket(timeBucket)
 		cursor := recordsByTime.Cursor()
 
-		if needle == "" {
+		if filter.empty() {
 			out.Total = recordsByTime.Stats().KeyN
 		}
 
@@ -182,8 +200,8 @@ func (s *store) page(page int, perPage int, query string) pageResult {
 				continue
 			}
 
-			if needle != "" {
-				if !record.matches(needle) {
+			if !filter.empty() {
+				if !record.matches(filter) {
 					continue
 				}
 				out.Total++
@@ -196,7 +214,7 @@ func (s *store) page(page int, perPage int, query string) pageResult {
 
 			if len(out.Records) >= perPage {
 				out.HasMore = true
-				if needle == "" {
+				if filter.empty() {
 					break
 				}
 				continue
@@ -205,7 +223,7 @@ func (s *store) page(page int, perPage int, query string) pageResult {
 			out.Records = append(out.Records, record)
 		}
 
-		if needle == "" && !out.HasMore {
+		if filter.empty() && !out.HasMore {
 			out.HasMore = page*perPage < out.Total
 		}
 
@@ -263,14 +281,14 @@ func (s *store) insert(source string, sentAt time.Time, receivedAt time.Time, li
 	return accepted, duplicates, err
 }
 
-func (s *store) exportNDJSON(w io.Writer) error {
+func (s *store) exportNDJSON(w io.Writer, filter recordFilter) error {
 	encoder := json.NewEncoder(w)
-	return s.eachOldest(func(record storedRecord) error {
+	return s.eachOldest(filter, func(record storedRecord) error {
 		return encoder.Encode(record)
 	})
 }
 
-func (s *store) exportCSV(w io.Writer) error {
+func (s *store) exportCSV(w io.Writer, filter recordFilter) error {
 	writer := csv.NewWriter(w)
 	if err := writer.Write([]string{
 		"received_at",
@@ -290,7 +308,7 @@ func (s *store) exportCSV(w io.Writer) error {
 		return err
 	}
 
-	err := s.eachOldest(func(record storedRecord) error {
+	err := s.eachOldest(filter, func(record storedRecord) error {
 		l := record.Listing
 		return writer.Write([]string{
 			record.ReceivedAt.Format(time.RFC3339Nano),
@@ -316,7 +334,8 @@ func (s *store) exportCSV(w io.Writer) error {
 	return writer.Error()
 }
 
-func (s *store) eachOldest(fn func(storedRecord) error) error {
+func (s *store) eachOldest(filter recordFilter, fn func(storedRecord) error) error {
+	filter.normalize()
 	return s.db.View(func(tx *bolt.Tx) error {
 		recordsByHash := tx.Bucket(recordsBucket)
 		recordsByTime := tx.Bucket(timeBucket)
@@ -333,6 +352,10 @@ func (s *store) eachOldest(fn func(storedRecord) error) error {
 				return err
 			}
 
+			if !filter.empty() && !record.matches(filter) {
+				continue
+			}
+
 			if err := fn(record); err != nil {
 				return err
 			}
@@ -342,16 +365,88 @@ func (s *store) eachOldest(fn func(storedRecord) error) error {
 	})
 }
 
-func (r storedRecord) matches(needle string) bool {
+func (f *recordFilter) normalize() {
+	f.Query = cleanFilterText(f.Query)
+	f.Name = cleanFilterText(f.Name)
+	f.HomeWorld = cleanFilterText(f.HomeWorld)
+	f.Description = cleanFilterText(f.Description)
+	f.SearchArea = cleanFilterText(f.SearchArea)
+	f.Hash = cleanFilterText(f.Hash)
+	f.Source = cleanFilterText(f.Source)
+}
+
+func (f recordFilter) empty() bool {
+	return f.Query == "" &&
+		f.Name == "" &&
+		f.HomeWorld == "" &&
+		f.Description == "" &&
+		f.SearchArea == "" &&
+		f.Hash == "" &&
+		f.Source == "" &&
+		!f.HasDutyID &&
+		!f.HasListingID &&
+		!f.HasMinilvMin &&
+		!f.HasMinilvMax
+}
+
+func cleanFilterText(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func (r storedRecord) matches(filter recordFilter) bool {
 	l := r.Listing
-	return strings.Contains(strings.ToLower(l.Name), needle) ||
-		strings.Contains(strings.ToLower(l.HomeWorld), needle) ||
-		strings.Contains(strings.ToLower(l.Description), needle) ||
-		strings.Contains(strings.ToLower(l.SearchArea), needle) ||
-		strings.Contains(strings.ToLower(l.Hash), needle) ||
+
+	if filter.Query != "" && !r.matchesAny(filter.Query) {
+		return false
+	}
+	if filter.Name != "" && !containsFold(l.Name, filter.Name) {
+		return false
+	}
+	if filter.HomeWorld != "" && !containsFold(l.HomeWorld, filter.HomeWorld) {
+		return false
+	}
+	if filter.Description != "" && !containsFold(l.Description, filter.Description) {
+		return false
+	}
+	if filter.SearchArea != "" && !containsFold(l.SearchArea, filter.SearchArea) {
+		return false
+	}
+	if filter.Hash != "" && !containsFold(l.Hash, filter.Hash) {
+		return false
+	}
+	if filter.Source != "" && !containsFold(r.Source, filter.Source) {
+		return false
+	}
+	if filter.HasDutyID && l.DutyID != filter.DutyID {
+		return false
+	}
+	if filter.HasListingID && l.ListingID != filter.ListingID {
+		return false
+	}
+	if filter.HasMinilvMin && l.Minilv < filter.MinilvMin {
+		return false
+	}
+	if filter.HasMinilvMax && l.Minilv > filter.MinilvMax {
+		return false
+	}
+
+	return true
+}
+
+func (r storedRecord) matchesAny(needle string) bool {
+	l := r.Listing
+	return containsFold(l.Name, needle) ||
+		containsFold(l.HomeWorld, needle) ||
+		containsFold(l.Description, needle) ||
+		containsFold(l.SearchArea, needle) ||
+		containsFold(l.Hash, needle) ||
 		strings.Contains(strconv.FormatUint(uint64(l.DutyID), 10), needle) ||
 		strings.Contains(strconv.FormatUint(uint64(l.Minilv), 10), needle) ||
-		strings.Contains(strings.ToLower(r.Source), needle)
+		containsFold(r.Source, needle)
+}
+
+func containsFold(value string, needle string) bool {
+	return strings.Contains(strings.ToLower(value), needle)
 }
 
 func (l *listing) normalize() {
