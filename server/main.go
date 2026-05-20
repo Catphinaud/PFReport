@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -82,10 +83,10 @@ func (s *server) routes(w http.ResponseWriter, r *http.Request) {
 		{Method: "GET", Path: "/health", Description: "health check"},
 		{Method: "GET", Path: "/v1/routes", Description: "route list"},
 		{Method: "GET", Path: "/v1/stats", Description: "counters"},
-		{Method: "GET", Path: "/v1/recent?limit=100&q=spam", Description: "recent listings"},
+		{Method: "GET", Path: "/v1/recent?page=1&perPage=100&q=spam", Description: "paged recent listings"},
 		{Method: "POST", Path: "/v1/listings", Description: "ingest"},
 		{Method: "POST", Path: "/v1/test", Description: "connectivity test"},
-		{Method: "GET", Path: "/v1/export", Description: "ndjson export"},
+		{Method: "GET", Path: "/v1/export?format=csv&gzip=1", Description: "export"},
 	})
 }
 
@@ -104,20 +105,20 @@ func (s *server) recent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 100
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid limit"})
-			return
-		}
-
-		limit = parsed
+	page := queryInt(r, "page", 1)
+	perPage := queryInt(r, "perPage", 0)
+	if perPage == 0 {
+		perPage = queryInt(r, "limit", 100)
 	}
 
+	result := s.store.page(page, perPage, r.URL.Query().Get("q"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
-		"records":  s.store.recent(limit, r.URL.Query().Get("q")),
+		"records":  result.Records,
+		"page":     result.Page,
+		"perPage":  result.PerPage,
+		"total":    result.Total,
+		"hasMore":  result.HasMore,
 		"serverAt": time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
@@ -188,8 +189,40 @@ func (s *server) export(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	if err := s.store.exportNDJSON(w); err != nil {
+	format := strings.ToLower(r.URL.Query().Get("format"))
+	if format == "" {
+		format = "ndjson"
+	}
+
+	var fileName string
+	var contentType string
+	var export func(io.Writer) error
+	switch format {
+	case "csv":
+		fileName = "pfreport.csv"
+		contentType = "text/csv; charset=utf-8"
+		export = s.store.exportCSV
+	case "ndjson", "jsonl":
+		fileName = "pfreport.ndjson"
+		contentType = "application/x-ndjson"
+		export = s.store.exportNDJSON
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad export format"})
+		return
+	}
+
+	out := io.Writer(w)
+	if wantsGzip(r) {
+		fileName += ".gz"
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		out = gz
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+	if err := export(out); err != nil {
 		log.Printf("export failed: %v", err)
 	}
 }
@@ -205,6 +238,28 @@ func (s *server) authorized(r *http.Request) bool {
 	}
 
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1
+}
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+
+	return n
+}
+
+func wantsGzip(r *http.Request) bool {
+	if r.URL.Query().Get("gzip") == "1" {
+		return true
+	}
+
+	return strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 }
 
 func getenv(key string, fallback string) string {

@@ -75,7 +75,7 @@
 
         .toolbar {
             display: grid;
-            grid-template-columns: minmax(220px, 1.2fr) minmax(280px, 2fr) 100px 110px;
+            grid-template-columns: minmax(220px, 1.2fr) minmax(280px, 2fr) 90px 90px 90px 90px;
             gap: 8px;
             margin: 0 0 14px;
         }
@@ -105,7 +105,7 @@
 
         .stats {
             display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
+            grid-template-columns: repeat(6, minmax(0, 1fr));
             gap: 1px;
             margin: 0 0 14px;
             border: 1px solid var(--line);
@@ -221,7 +221,10 @@
     <section class="toolbar" aria-label="Filters">
         <input id="token" type="password" placeholder="Bearer token, if configured">
         <input id="query" placeholder="Search name, world, duty, minilv, hash, description">
+        <input id="page" type="number" min="1" value="1">
         <input id="limit" type="number" min="1" max="2000" value="100">
+        <button id="prevPage">Prev</button>
+        <button id="nextPage">Next</button>
         <button id="refresh">Refresh</button>
     </section>
 
@@ -233,6 +236,10 @@
         <div class="stat">
             <div class="label">Recent</div>
             <div class="value" id="recentAvailable">-</div>
+        </div>
+        <div class="stat">
+            <div class="label">Page</div>
+            <div class="value" id="pageState">-</div>
         </div>
         <div class="stat">
             <div class="label">Limit</div>
@@ -308,10 +315,14 @@
     }
 
     function loadRecords() {
+      const page = encodeURIComponent($("#page").val() || "1");
       const limit = encodeURIComponent($("#limit").val() || "100");
       const q = encodeURIComponent($("#query").val() || "");
-      return api("/v1/recent?limit=" + limit + "&q=" + q).done(function (data) {
+      return api("/v1/recent?page=" + page + "&perPage=" + limit + "&q=" + q).done(function (data) {
         const rows = data.records || [];
+        $("#pageState").text((data.page || 1) + " / " + Math.max(1, Math.ceil((data.total || 0) / (data.perPage || 1))));
+        $("#nextPage").prop("disabled", !data.hasMore);
+        $("#prevPage").prop("disabled", (data.page || 1) <= 1);
         $("#records").empty();
         if (!rows.length) {
         $("#records").append('<tr><td colspan="8" class="empty">No records</td></tr>');
@@ -364,7 +375,17 @@
     $(function () {
       $("#token").val(localStorage.getItem("pfreportToken") || "");
       $("#refresh").on("click", refresh);
-      $("#query").on("keydown", function (e) { if (e.key === "Enter") refresh(); });
+      $("#prevPage").on("click", function () {
+        const page = Math.max(1, parseInt($("#page").val() || "1", 10) - 1);
+        $("#page").val(page);
+        refresh();
+      });
+      $("#nextPage").on("click", function () {
+        const page = Math.max(1, parseInt($("#page").val() || "1", 10) + 1);
+        $("#page").val(page);
+        refresh();
+      });
+      $("#query").on("keydown", function (e) { if (e.key === "Enter") { $("#page").val(1); refresh(); } });
       refresh();
       setInterval(refresh, 10000);
     });

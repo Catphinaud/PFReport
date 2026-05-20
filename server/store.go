@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,14 @@ type storeStats struct {
 	RecentCapacity  int    `json:"recentCapacity"`
 	StoragePath     string `json:"storagePath"`
 	Database        string `json:"database"`
+}
+
+type pageResult struct {
+	Records []storedRecord `json:"records"`
+	Page    int            `json:"page"`
+	PerPage int            `json:"perPage"`
+	Total   int            `json:"total"`
+	HasMore bool           `json:"hasMore"`
 }
 
 func openStore(path string) (*store, error) {
@@ -128,22 +137,41 @@ func (s *store) stats() storeStats {
 }
 
 func (s *store) recent(limit int, query string) []storedRecord {
-	if limit <= 0 {
-		limit = 100
+	page := s.page(1, limit, query)
+	return page.Records
+}
+
+func (s *store) page(page int, perPage int, query string) pageResult {
+	if page <= 0 {
+		page = 1
 	}
 
-	if limit > maxRecentRecords {
-		limit = maxRecentRecords
+	if perPage <= 0 {
+		perPage = 100
 	}
 
-	records := make([]storedRecord, 0, limit)
+	if perPage > maxRecentRecords {
+		perPage = maxRecentRecords
+	}
+
+	skip := (page - 1) * perPage
 	needle := strings.ToLower(strings.TrimSpace(query))
+	out := pageResult{
+		Records: make([]storedRecord, 0, perPage),
+		Page:    page,
+		PerPage: perPage,
+	}
+
 	_ = s.db.View(func(tx *bolt.Tx) error {
 		recordsByHash := tx.Bucket(recordsBucket)
 		recordsByTime := tx.Bucket(timeBucket)
 		cursor := recordsByTime.Cursor()
 
-		for timeKey, hashKey := cursor.Last(); timeKey != nil && len(records) < limit; timeKey, hashKey = cursor.Prev() {
+		if needle == "" {
+			out.Total = recordsByTime.Stats().KeyN
+		}
+
+		for timeKey, hashKey := cursor.Last(); timeKey != nil; timeKey, hashKey = cursor.Prev() {
 			raw := recordsByHash.Get(hashKey)
 			if raw == nil {
 				continue
@@ -154,17 +182,37 @@ func (s *store) recent(limit int, query string) []storedRecord {
 				continue
 			}
 
-			if needle != "" && !record.matches(needle) {
+			if needle != "" {
+				if !record.matches(needle) {
+					continue
+				}
+				out.Total++
+			}
+
+			if skip > 0 {
+				skip--
 				continue
 			}
 
-			records = append(records, record)
+			if len(out.Records) >= perPage {
+				out.HasMore = true
+				if needle == "" {
+					break
+				}
+				continue
+			}
+
+			out.Records = append(out.Records, record)
+		}
+
+		if needle == "" && !out.HasMore {
+			out.HasMore = page*perPage < out.Total
 		}
 
 		return nil
 	})
 
-	return records
+	return out
 }
 
 func (s *store) insert(source string, sentAt time.Time, receivedAt time.Time, listings []listing) (int, int, error) {
@@ -217,6 +265,58 @@ func (s *store) insert(source string, sentAt time.Time, receivedAt time.Time, li
 
 func (s *store) exportNDJSON(w io.Writer) error {
 	encoder := json.NewEncoder(w)
+	return s.eachOldest(func(record storedRecord) error {
+		return encoder.Encode(record)
+	})
+}
+
+func (s *store) exportCSV(w io.Writer) error {
+	writer := csv.NewWriter(w)
+	if err := writer.Write([]string{
+		"received_at",
+		"source",
+		"sent_at",
+		"hash",
+		"listing_id",
+		"duty_id",
+		"minilv",
+		"name",
+		"home_world",
+		"description",
+		"search_area",
+		"search_area_raw",
+		"observed_at",
+	}); err != nil {
+		return err
+	}
+
+	err := s.eachOldest(func(record storedRecord) error {
+		l := record.Listing
+		return writer.Write([]string{
+			record.ReceivedAt.Format(time.RFC3339Nano),
+			record.Source,
+			record.SentAt.Format(time.RFC3339Nano),
+			l.Hash,
+			strconv.FormatUint(l.ListingID, 10),
+			strconv.FormatUint(uint64(l.DutyID), 10),
+			strconv.FormatUint(uint64(l.Minilv), 10),
+			l.Name,
+			l.HomeWorld,
+			l.Description,
+			l.SearchArea,
+			strconv.FormatUint(uint64(l.SearchAreaRaw), 10),
+			l.ObservedAt.Format(time.RFC3339Nano),
+		})
+	})
+	if err != nil {
+		return err
+	}
+
+	writer.Flush()
+	return writer.Error()
+}
+
+func (s *store) eachOldest(fn func(storedRecord) error) error {
 	return s.db.View(func(tx *bolt.Tx) error {
 		recordsByHash := tx.Bucket(recordsBucket)
 		recordsByTime := tx.Bucket(timeBucket)
@@ -233,7 +333,7 @@ func (s *store) exportNDJSON(w io.Writer) error {
 				return err
 			}
 
-			if err := encoder.Encode(record); err != nil {
+			if err := fn(record); err != nil {
 				return err
 			}
 		}

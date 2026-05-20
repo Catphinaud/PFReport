@@ -48,10 +48,11 @@ It shows recent rows and has a search box. If token auth is on, paste the token 
 - `GET /v1/stats`
     - counters and some db info
 
-- `GET /v1/recent?limit=100&q=spam`
+- `GET /v1/recent?page=1&perPage=100&q=spam`
     - recent rows as json
-    - `limit` max is 2000
-    - `q` searches name/world/hash/area/description/source
+    - old `limit=100` still works too
+    - `perPage` max is 2000
+    - `q` searches name/world/hash/duty/minilv/area/description/source
 
 - `POST /v1/listings`
     - main ingest endpoint for the plugin
@@ -64,6 +65,12 @@ It shows recent rows and has a search box. If token auth is on, paste the token 
 
 - `GET /v1/export`
     - dumps stored rows as ndjson
+
+- `GET /v1/export?format=csv`
+    - dumps csv
+
+- `GET /v1/export?format=csv&gzip=1`
+    - dumps csv.gz
     - useful for later scripts / ml data stuff
 
 ## test

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -140,6 +142,130 @@ func TestRecentRouteReturnsNewestFirst(t *testing.T) {
 
 	if response.Records[0].Listing.Name != "Second Player" {
 		t.Fatalf("newest record = %q", response.Records[0].Listing.Name)
+	}
+}
+
+func TestRecentRoutePaginates(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "pfreport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+
+	server := &server{store: store, maxBodyBytes: defaultMaxBodyBytes}
+	now := time.Now().UTC()
+	_, _, err = store.insert("test", now, now, []listing{
+		{Hash: "0000000000000011", ListingID: 11, Name: "One", HomeWorld: "Ragnarok", Description: "one", SearchArea: "DataCenter", ObservedAt: now},
+		{Hash: "0000000000000012", ListingID: 12, Name: "Two", HomeWorld: "Ragnarok", Description: "two", SearchArea: "DataCenter", ObservedAt: now.Add(time.Millisecond)},
+		{Hash: "0000000000000013", ListingID: 13, Name: "Three", HomeWorld: "Ragnarok", Description: "three", SearchArea: "DataCenter", ObservedAt: now.Add(2 * time.Millisecond)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/recent?page=2&perPage=1", nil)
+	rec := httptest.NewRecorder()
+	server.recent(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	var response struct {
+		Records []storedRecord `json:"records"`
+		Page    int            `json:"page"`
+		PerPage int            `json:"perPage"`
+		Total   int            `json:"total"`
+		HasMore bool           `json:"hasMore"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+
+	if response.Page != 2 || response.PerPage != 1 || response.Total != 3 || !response.HasMore {
+		t.Fatalf("bad page response: %+v", response)
+	}
+
+	if len(response.Records) != 1 || response.Records[0].Listing.Name != "Two" {
+		t.Fatalf("records = %+v", response.Records)
+	}
+}
+
+func TestExportCSV(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "pfreport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+
+	server := &server{store: store, maxBodyBytes: defaultMaxBodyBytes}
+	now := time.Now().UTC()
+	_, _, err = store.insert("test", now, now, []listing{{
+		Hash: "0000000000000021", ListingID: 21, DutyID: 777, Minilv: 710, Name: "CSV Player", HomeWorld: "Ragnarok", Description: "hello,csv", SearchArea: "DataCenter", SearchAreaRaw: 1, ObservedAt: now,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/export?format=csv", nil)
+	rec := httptest.NewRecorder()
+	server.export(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	rows, err := csv.NewReader(bytes.NewReader(rec.Body.Bytes())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d", len(rows))
+	}
+
+	if rows[1][7] != "CSV Player" || rows[1][9] != "hello,csv" {
+		t.Fatalf("row = %#v", rows[1])
+	}
+}
+
+func TestExportGzip(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "pfreport.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+
+	server := &server{store: store, maxBodyBytes: defaultMaxBodyBytes}
+	now := time.Now().UTC()
+	_, _, err = store.insert("test", now, now, []listing{{
+		Hash: "0000000000000031", ListingID: 31, Name: "Zip Player", HomeWorld: "Ragnarok", Description: "zip", SearchArea: "DataCenter", ObservedAt: now,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/export?format=csv&gzip=1", nil)
+	rec := httptest.NewRecorder()
+	server.export(rec, req)
+
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("encoding = %q", rec.Header().Get("Content-Encoding"))
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+
+	rows, err := csv.NewReader(zr).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rows) != 2 || rows[1][7] != "Zip Player" {
+		t.Fatalf("rows = %#v", rows)
 	}
 }
 
